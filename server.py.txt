@@ -1,0 +1,440 @@
+from fastapi import FastAPI, APIRouter, HTTPException
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional
+import uuid
+from datetime import datetime, timezone
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+app = FastAPI()
+api_router = APIRouter(prefix="/api")
+
+# ==================== MODELS ====================
+
+class User(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+class UserCreate(BaseModel):
+    name: str
+
+class MemberStats(BaseModel):
+    user_id: str
+    name: str
+    wins: int = 0
+    losses: int = 0
+    games_played: int = 0
+    win_streak: int = 0
+    best_streak: int = 0
+
+class ChallengeResult(BaseModel):
+    player_id: str
+    player_name: str
+    status: str = "pending"  # pending, won, lost
+    tries: int = 0
+    hints_used: int = 0
+    completed_at: Optional[str] = None
+
+class Challenge(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    group_id: str
+    creator_id: str
+    creator_name: str
+    movie_id: int
+    vowel_limit: int = 3
+    open_to_future: bool = False
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    status: str = "active"
+    participant_ids: List[str] = []
+    results: List[ChallengeResult] = []
+
+class ChallengeCreate(BaseModel):
+    group_id: str
+    creator_id: str
+    creator_name: str
+    movie_id: int
+    vowel_limit: int = 3
+    open_to_future: bool = False
+    participant_ids: List[str]
+
+class Group(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    creator_id: str
+    creator_name: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    members: List[MemberStats] = []
+
+class GroupCreate(BaseModel):
+    name: str
+    creator_id: str
+    creator_name: str
+
+class GameResult(BaseModel):
+    challenge_id: str
+    player_id: str
+    player_name: str
+    won: bool
+    tries: int
+    hints_used: int = 0
+
+class Movie(BaseModel):
+    id: int
+    title: str
+    year: int
+    actors: str
+    difficulty: int  # 1=Easy, 2=Medium, 3=Hard
+
+# ==================== MOVIE CATALOG (100 Movies) ====================
+
+MOVIES_CATALOG: List[Movie] = [
+    # Easy (1-word titles) - 33 movies
+    Movie(id=1, title="SHOLAY", year=1975, actors="Amitabh Bachchan, Dharmendra", difficulty=1),
+    Movie(id=2, title="LAGAAN", year=2001, actors="Aamir Khan, Gracy Singh", difficulty=1),
+    Movie(id=3, title="DANGAL", year=2016, actors="Aamir Khan, Sakshi Tanwar", difficulty=1),
+    Movie(id=4, title="GHAJINI", year=2008, actors="Aamir Khan, Asin", difficulty=1),
+    Movie(id=5, title="WANTED", year=2009, actors="Salman Khan, Ayesha Takia", difficulty=1),
+    Movie(id=6, title="KRRISH", year=2006, actors="Hrithik Roshan, Priyanka Chopra", difficulty=1),
+    Movie(id=7, title="DON", year=2006, actors="Shah Rukh Khan, Priyanka Chopra", difficulty=1),
+    Movie(id=8, title="DHOOM", year=2004, actors="John Abraham, Abhishek Bachchan", difficulty=1),
+    Movie(id=9, title="RAEES", year=2017, actors="Shah Rukh Khan, Mahira Khan", difficulty=1),
+    Movie(id=10, title="PADMAAVAT", year=2018, actors="Deepika Padukone, Ranveer Singh", difficulty=1),
+    Movie(id=11, title="SIMMBA", year=2018, actors="Ranveer Singh, Sara Ali Khan", difficulty=1),
+    Movie(id=12, title="SULTAN", year=2016, actors="Salman Khan, Anushka Sharma", difficulty=1),
+    Movie(id=13, title="BARFI", year=2012, actors="Ranbir Kapoor, Priyanka Chopra", difficulty=1),
+    Movie(id=14, title="ROCKSTAR", year=2011, actors="Ranbir Kapoor, Nargis Fakhri", difficulty=1),
+    Movie(id=15, title="AGNEEPATH", year=2012, actors="Hrithik Roshan, Sanjay Dutt", difficulty=1),
+    Movie(id=16, title="KAABIL", year=2017, actors="Hrithik Roshan, Yami Gautam", difficulty=1),
+    Movie(id=17, title="BADLA", year=2019, actors="Amitabh Bachchan, Taapsee Pannu", difficulty=1),
+    Movie(id=18, title="ARTICLE", year=2019, actors="Ayushmann Khurrana, Anubhav Sinha", difficulty=1),
+    Movie(id=19, title="ANDHADHUN", year=2018, actors="Ayushmann Khurrana, Tabu", difficulty=1),
+    Movie(id=20, title="STREE", year=2018, actors="Rajkummar Rao, Shraddha Kapoor", difficulty=1),
+    Movie(id=21, title="GOLMAAL", year=2006, actors="Ajay Devgn, Arshad Warsi", difficulty=1),
+    Movie(id=22, title="DRISHYAM", year=2015, actors="Ajay Devgn, Tabu", difficulty=1),
+    Movie(id=23, title="SINGHAM", year=2011, actors="Ajay Devgn, Kajal Aggarwal", difficulty=1),
+    Movie(id=24, title="RAID", year=2018, actors="Ajay Devgn, Ileana D'Cruz", difficulty=1),
+    Movie(id=25, title="TANHAJI", year=2020, actors="Ajay Devgn, Saif Ali Khan", difficulty=1),
+    Movie(id=26, title="WAR", year=2019, actors="Hrithik Roshan, Tiger Shroff", difficulty=1),
+    Movie(id=27, title="PUSHPA", year=2021, actors="Allu Arjun, Rashmika Mandanna", difficulty=1),
+    Movie(id=28, title="ANIMAL", year=2023, actors="Ranbir Kapoor, Rashmika Mandanna", difficulty=1),
+    Movie(id=29, title="PATHAAN", year=2023, actors="Shah Rukh Khan, Deepika Padukone", difficulty=1),
+    Movie(id=30, title="JAWAN", year=2023, actors="Shah Rukh Khan, Nayanthara", difficulty=1),
+    Movie(id=31, title="DUNKI", year=2023, actors="Shah Rukh Khan, Taapsee Pannu", difficulty=1),
+    Movie(id=32, title="FIGHTER", year=2024, actors="Hrithik Roshan, Deepika Padukone", difficulty=1),
+    Movie(id=33, title="CREW", year=2024, actors="Kareena Kapoor, Tabu, Kriti Sanon", difficulty=1),
+    
+    # Medium (2-3 word titles) - 33 movies
+    Movie(id=34, title="THREE IDIOTS", year=2009, actors="Aamir Khan, Kareena Kapoor", difficulty=2),
+    Movie(id=35, title="PK", year=2014, actors="Aamir Khan, Anushka Sharma", difficulty=1),
+    Movie(id=36, title="RANG DE BASANTI", year=2006, actors="Aamir Khan, Soha Ali Khan", difficulty=2),
+    Movie(id=37, title="TAARE ZAMEEN PAR", year=2007, actors="Aamir Khan, Darsheel Safary", difficulty=2),
+    Movie(id=38, title="CHENNAI EXPRESS", year=2013, actors="Shah Rukh Khan, Deepika Padukone", difficulty=2),
+    Movie(id=39, title="HAPPY NEW YEAR", year=2014, actors="Shah Rukh Khan, Deepika Padukone", difficulty=2),
+    Movie(id=40, title="OM SHANTI OM", year=2007, actors="Shah Rukh Khan, Deepika Padukone", difficulty=2),
+    Movie(id=41, title="MY NAME IS KHAN", year=2010, actors="Shah Rukh Khan, Kajol", difficulty=2),
+    Movie(id=42, title="BAJRANGI BHAIJAAN", year=2015, actors="Salman Khan, Kareena Kapoor", difficulty=2),
+    Movie(id=43, title="TIGER ZINDA HAI", year=2017, actors="Salman Khan, Katrina Kaif", difficulty=2),
+    Movie(id=44, title="DABANGG", year=2010, actors="Salman Khan, Sonakshi Sinha", difficulty=1),
+    Movie(id=45, title="KICK", year=2014, actors="Salman Khan, Jacqueline Fernandez", difficulty=1),
+    Movie(id=46, title="ZINDAGI NA MILEGI DOBARA", year=2011, actors="Hrithik Roshan, Farhan Akhtar", difficulty=3),
+    Movie(id=47, title="YEH JAWAANI HAI DEEWANI", year=2013, actors="Ranbir Kapoor, Deepika Padukone", difficulty=2),
+    Movie(id=48, title="BAJIRAO MASTANI", year=2015, actors="Ranveer Singh, Deepika Padukone", difficulty=2),
+    Movie(id=49, title="RAM LEELA", year=2013, actors="Ranveer Singh, Deepika Padukone", difficulty=2),
+    Movie(id=50, title="BAND BAAJA BAARAAT", year=2010, actors="Ranveer Singh, Anushka Sharma", difficulty=2),
+    Movie(id=51, title="GANGS OF WASSEYPUR", year=2012, actors="Manoj Bajpayee, Nawazuddin Siddiqui", difficulty=2),
+    Movie(id=52, title="QUEEN", year=2014, actors="Kangana Ranaut, Rajkummar Rao", difficulty=1),
+    Movie(id=53, title="TANU WEDS MANU", year=2011, actors="Kangana Ranaut, R Madhavan", difficulty=2),
+    Movie(id=54, title="HIGHWAY", year=2014, actors="Alia Bhatt, Randeep Hooda", difficulty=1),
+    Movie(id=55, title="DEAR ZINDAGI", year=2016, actors="Alia Bhatt, Shah Rukh Khan", difficulty=2),
+    Movie(id=56, title="RAAZI", year=2018, actors="Alia Bhatt, Vicky Kaushal", difficulty=1),
+    Movie(id=57, title="GULLY BOY", year=2019, actors="Ranveer Singh, Alia Bhatt", difficulty=2),
+    Movie(id=58, title="BHAAG MILKHA BHAAG", year=2013, actors="Farhan Akhtar, Sonam Kapoor", difficulty=2),
+    Movie(id=59, title="SPECIAL OPS", year=2020, actors="Kay Kay Menon, Karan Tacker", difficulty=2),
+    Movie(id=60, title="URI", year=2019, actors="Vicky Kaushal, Yami Gautam", difficulty=1),
+    Movie(id=61, title="SHUBH MANGAL SAAVDHAN", year=2017, actors="Ayushmann Khurrana, Bhumi Pednekar", difficulty=2),
+    Movie(id=62, title="BADHAAI HO", year=2018, actors="Ayushmann Khurrana, Sanya Malhotra", difficulty=2),
+    Movie(id=63, title="BALA", year=2019, actors="Ayushmann Khurrana, Bhumi Pednekar", difficulty=1),
+    Movie(id=64, title="DREAM GIRL", year=2019, actors="Ayushmann Khurrana, Nushrat Bharucha", difficulty=2),
+    Movie(id=65, title="PIKU", year=2015, actors="Deepika Padukone, Amitabh Bachchan", difficulty=1),
+    Movie(id=66, title="COCKTAIL", year=2012, actors="Deepika Padukone, Saif Ali Khan", difficulty=1),
+    
+    # Hard (4+ word titles / Long titles) - 34 movies
+    Movie(id=67, title="DILWALE DULHANIA LE JAYENGE", year=1995, actors="Shah Rukh Khan, Kajol", difficulty=3),
+    Movie(id=68, title="KABHI KHUSHI KABHIE GHAM", year=2001, actors="Shah Rukh Khan, Kajol", difficulty=3),
+    Movie(id=69, title="KAL HO NAA HO", year=2003, actors="Shah Rukh Khan, Preity Zinta", difficulty=3),
+    Movie(id=70, title="KABHI ALVIDA NAA KEHNA", year=2006, actors="Shah Rukh Khan, Rani Mukerji", difficulty=3),
+    Movie(id=71, title="DIL TO PAGAL HAI", year=1997, actors="Shah Rukh Khan, Madhuri Dixit", difficulty=3),
+    Movie(id=72, title="KUCH KUCH HOTA HAI", year=1998, actors="Shah Rukh Khan, Kajol", difficulty=3),
+    Movie(id=73, title="MOHABBATEIN", year=2000, actors="Shah Rukh Khan, Amitabh Bachchan", difficulty=2),
+    Movie(id=74, title="DEVDAS", year=2002, actors="Shah Rukh Khan, Aishwarya Rai", difficulty=1),
+    Movie(id=75, title="VEER ZAARA", year=2004, actors="Shah Rukh Khan, Preity Zinta", difficulty=2),
+    Movie(id=76, title="SWADES", year=2004, actors="Shah Rukh Khan, Gayatri Joshi", difficulty=1),
+    Movie(id=77, title="CHAK DE INDIA", year=2007, actors="Shah Rukh Khan, Vidya Malvade", difficulty=2),
+    Movie(id=78, title="RAB NE BANA DI JODI", year=2008, actors="Shah Rukh Khan, Anushka Sharma", difficulty=3),
+    Movie(id=79, title="JABB TAK HAI JAAN", year=2012, actors="Shah Rukh Khan, Katrina Kaif", difficulty=3),
+    Movie(id=80, title="DIL CHAHTA HAI", year=2001, actors="Aamir Khan, Saif Ali Khan", difficulty=2),
+    Movie(id=81, title="HERA PHERI", year=2000, actors="Akshay Kumar, Paresh Rawal", difficulty=2),
+    Movie(id=82, title="PHIR HERA PHERI", year=2006, actors="Akshay Kumar, Paresh Rawal", difficulty=2),
+    Movie(id=83, title="WELCOME", year=2007, actors="Akshay Kumar, Katrina Kaif", difficulty=1),
+    Movie(id=84, title="HOUSEFULL", year=2010, actors="Akshay Kumar, Deepika Padukone", difficulty=1),
+    Movie(id=85, title="ROWDY RATHORE", year=2012, actors="Akshay Kumar, Sonakshi Sinha", difficulty=2),
+    Movie(id=86, title="HOLIDAY", year=2014, actors="Akshay Kumar, Sonakshi Sinha", difficulty=1),
+    Movie(id=87, title="BABY", year=2015, actors="Akshay Kumar, Taapsee Pannu", difficulty=1),
+    Movie(id=88, title="AIRLIFT", year=2016, actors="Akshay Kumar, Nimrat Kaur", difficulty=1),
+    Movie(id=89, title="RUSTOM", year=2016, actors="Akshay Kumar, Ileana D'Cruz", difficulty=1),
+    Movie(id=90, title="TOILET EK PREM KATHA", year=2017, actors="Akshay Kumar, Bhumi Pednekar", difficulty=3),
+    Movie(id=91, title="PADMAN", year=2018, actors="Akshay Kumar, Sonam Kapoor", difficulty=1),
+    Movie(id=92, title="MISSION MANGAL", year=2019, actors="Akshay Kumar, Vidya Balan", difficulty=2),
+    Movie(id=93, title="GOOD NEWWZ", year=2019, actors="Akshay Kumar, Kareena Kapoor", difficulty=2),
+    Movie(id=94, title="SOORYAVANSHI", year=2021, actors="Akshay Kumar, Katrina Kaif", difficulty=1),
+    Movie(id=95, title="DHADAK", year=2018, actors="Janhvi Kapoor, Ishaan Khatter", difficulty=1),
+    Movie(id=96, title="STUDENT OF THE YEAR", year=2012, actors="Alia Bhatt, Varun Dhawan", difficulty=3),
+    Movie(id=97, title="HUMPTY SHARMA KI DULHANIA", year=2014, actors="Alia Bhatt, Varun Dhawan", difficulty=3),
+    Movie(id=98, title="BADRINATH KI DULHANIA", year=2017, actors="Alia Bhatt, Varun Dhawan", difficulty=3),
+    Movie(id=99, title="SONU KE TITU KI SWEETY", year=2018, actors="Kartik Aaryan, Nushrat Bharucha", difficulty=3),
+    Movie(id=100, title="PYAAR KA PUNCHNAMA", year=2011, actors="Kartik Aaryan, Nushrat Bharucha", difficulty=3),
+]
+
+# ==================== API ENDPOINTS ====================
+
+@api_router.get("/")
+async def root():
+    return {"message": "Bollywood Hangman API"}
+
+# ----- USERS -----
+@api_router.post("/users", response_model=User)
+async def create_user(input: UserCreate):
+    user = User(name=input.name)
+    doc = user.model_dump()
+    await db.users.insert_one(doc)
+    return user
+
+@api_router.get("/users/{user_id}", response_model=User)
+async def get_user(user_id: str):
+    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+# ----- MOVIES -----
+@api_router.get("/movies", response_model=List[Movie])
+async def get_movies(
+    year_start: Optional[int] = None,
+    year_end: Optional[int] = None,
+    difficulty: Optional[int] = None,
+    actor: Optional[str] = None
+):
+    movies = MOVIES_CATALOG
+    if year_start:
+        movies = [m for m in movies if m.year >= year_start]
+    if year_end:
+        movies = [m for m in movies if m.year <= year_end]
+    if difficulty:
+        movies = [m for m in movies if m.difficulty == difficulty]
+    if actor:
+        movies = [m for m in movies if actor.lower() in m.actors.lower()]
+    return movies
+
+@api_router.get("/movies/{movie_id}", response_model=Movie)
+async def get_movie(movie_id: int):
+    for m in MOVIES_CATALOG:
+        if m.id == movie_id:
+            return m
+    raise HTTPException(status_code=404, detail="Movie not found")
+
+@api_router.get("/movies/actors/list")
+async def get_actors():
+    actors_set = set()
+    for m in MOVIES_CATALOG:
+        for actor in m.actors.split(", "):
+            actors_set.add(actor.strip())
+    return sorted(list(actors_set))
+
+# ----- GROUPS -----
+@api_router.post("/groups", response_model=Group)
+async def create_group(input: GroupCreate):
+    group = Group(
+        name=input.name,
+        creator_id=input.creator_id,
+        creator_name=input.creator_name,
+        members=[MemberStats(user_id=input.creator_id, name=input.creator_name)]
+    )
+    doc = group.model_dump()
+    await db.groups.insert_one(doc)
+    return group
+
+@api_router.get("/groups/{group_id}", response_model=Group)
+async def get_group(group_id: str):
+    group = await db.groups.find_one({"id": group_id}, {"_id": 0})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return group
+
+@api_router.get("/users/{user_id}/groups", response_model=List[Group])
+async def get_user_groups(user_id: str):
+    groups = await db.groups.find(
+        {"members.user_id": user_id},
+        {"_id": 0}
+    ).to_list(100)
+    return groups
+
+@api_router.post("/groups/{group_id}/join")
+async def join_group(group_id: str, user_id: str, user_name: str):
+    group = await db.groups.find_one({"id": group_id})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Check if already a member
+    for member in group.get("members", []):
+        if member["user_id"] == user_id:
+            return {"message": "Already a member", "group": group}
+    
+    # Add member
+    new_member = MemberStats(user_id=user_id, name=user_name).model_dump()
+    await db.groups.update_one(
+        {"id": group_id},
+        {"$push": {"members": new_member}}
+    )
+    updated_group = await db.groups.find_one({"id": group_id}, {"_id": 0})
+    return {"message": "Joined successfully", "group": updated_group}
+
+# ----- CHALLENGES -----
+@api_router.post("/challenges", response_model=Challenge)
+async def create_challenge(input: ChallengeCreate):
+    # Get participant names from group
+    group = await db.groups.find_one({"id": input.group_id})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    results = []
+    for pid in input.participant_ids:
+        pname = next((m["name"] for m in group["members"] if m["user_id"] == pid), "Unknown")
+        results.append(ChallengeResult(player_id=pid, player_name=pname))
+    
+    challenge = Challenge(
+        group_id=input.group_id,
+        creator_id=input.creator_id,
+        creator_name=input.creator_name,
+        movie_id=input.movie_id,
+        vowel_limit=input.vowel_limit,
+        open_to_future=input.open_to_future,
+        participant_ids=input.participant_ids,
+        results=results
+    )
+    doc = challenge.model_dump()
+    await db.challenges.insert_one(doc)
+    return challenge
+
+@api_router.get("/challenges/{challenge_id}", response_model=Challenge)
+async def get_challenge(challenge_id: str):
+    challenge = await db.challenges.find_one({"id": challenge_id}, {"_id": 0})
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Challenge not found")
+    return challenge
+
+@api_router.get("/groups/{group_id}/challenges", response_model=List[Challenge])
+async def get_group_challenges(group_id: str, status: Optional[str] = None):
+    query = {"group_id": group_id}
+    if status:
+        query["status"] = status
+    challenges = await db.challenges.find(query, {"_id": 0}).to_list(100)
+    return challenges
+
+@api_router.post("/challenges/{challenge_id}/result")
+async def submit_challenge_result(challenge_id: str, result: GameResult):
+    challenge = await db.challenges.find_one({"id": challenge_id})
+    if not challenge:
+        raise HTTPException(status_code=404, detail="Challenge not found")
+    
+    # Update player result in challenge
+    results = challenge.get("results", [])
+    for r in results:
+        if r["player_id"] == result.player_id:
+            r["status"] = "won" if result.won else "lost"
+            r["tries"] = result.tries
+            r["hints_used"] = result.hints_used
+            r["completed_at"] = datetime.now(timezone.utc).isoformat()
+            break
+    
+    # Check if all completed
+    all_completed = all(r["status"] != "pending" for r in results)
+    new_status = "completed" if all_completed else "active"
+    
+    await db.challenges.update_one(
+        {"id": challenge_id},
+        {"$set": {"results": results, "status": new_status}}
+    )
+    
+    # Update player stats in group
+    group_id = challenge["group_id"]
+    group = await db.groups.find_one({"id": group_id})
+    if group:
+        members = group.get("members", [])
+        for m in members:
+            if m["user_id"] == result.player_id:
+                m["games_played"] = m.get("games_played", 0) + 1
+                if result.won:
+                    m["wins"] = m.get("wins", 0) + 1
+                    m["win_streak"] = m.get("win_streak", 0) + 1
+                    if m["win_streak"] > m.get("best_streak", 0):
+                        m["best_streak"] = m["win_streak"]
+                else:
+                    m["losses"] = m.get("losses", 0) + 1
+                    m["win_streak"] = 0
+                break
+        
+        await db.groups.update_one(
+            {"id": group_id},
+            {"$set": {"members": members}}
+        )
+    
+    return {"message": "Result submitted", "challenge_status": new_status}
+
+@api_router.get("/users/{user_id}/pending-challenges")
+async def get_user_pending_challenges(user_id: str):
+    challenges = await db.challenges.find(
+        {
+            "participant_ids": user_id,
+            "status": "active",
+            "results": {"$elemMatch": {"player_id": user_id, "status": "pending"}}
+        },
+        {"_id": 0}
+    ).to_list(100)
+    return challenges
+
+# Include router
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
